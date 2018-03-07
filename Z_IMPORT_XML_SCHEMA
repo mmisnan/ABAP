@@ -1,0 +1,333 @@
+*&---------------------------------------------------------------------*
+*& Report  Z_IMPORT_XML_SCHEMA
+*&
+*&---------------------------------------------------------------------*
+*& This reports imports an XSD file and calls standard ABAP/4 proxy generation
+*& methods to (re-)create DDIC objects
+*&---------------------------------------------------------------------*
+
+ REPORT  z_import_xml_schema.
+
+ TYPE-POOLS: sprx,
+             trwbo.
+ CONSTANTS:
+        gc_lcl TYPE packname VALUE '$TMP'.
+ DATA:
+      go_proxy    TYPE REF TO cl_proxy,
+      gv_xcontent TYPE xstring,
+      gv_wsdl     TYPE xstring.
+
+ PARAMETERS:
+           p_xsdfn TYPE anyuri OBLIGATORY VALUE CHECK. "XML Schema file name
+
+ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME.
+ PARAMETERS:
+           p_pckg  TYPE packname   VALUE CHECK DEFAULT gc_lcl, " Package
+           p_trrq  TYPE trkorr     VALUE CHECK,                " Transport request
+           p_prfx  TYPE prx_prefix OBLIGATORY DEFAULT 'Z',     " Prefix
+           p_actv  AS CHECKBOX     DEFAULT 'X'.                " Activate immediately
+ SELECTION-SCREEN END OF BLOCK b1.
+
+* Transport request selection dialogue:
+ AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_trrq.
+   PERFORM get_transport_request CHANGING p_trrq. "
+
+* File name selection dialogue:
+ AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_xsdfn.
+   PERFORM get_file_name CHANGING p_xsdfn. "
+
+ START-OF-SELECTION.
+   IF p_xsdfn IS NOT INITIAL.
+     PERFORM upload_file USING p_xsdfn
+                               gv_xcontent.
+   ENDIF.
+   CHECK: gv_xcontent IS NOT INITIAL.
+   PERFORM xsd2wsdl USING gv_xcontent
+                          gv_wsdl.
+   CHECK: gv_wsdl IS NOT INITIAL.
+   PERFORM init_proxy USING gv_wsdl
+                            p_pckg
+                            p_prfx
+                      CHANGING
+                            go_proxy.
+   IF go_proxy IS NOT INITIAL.
+     PERFORM save_proxy USING go_proxy.
+     IF p_actv IS NOT INITIAL.
+       PERFORM activate_proxy USING go_proxy
+                                    p_trrq.
+     ENDIF.
+   ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Form  upload_file
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->IV_FILENAME  text
+*      -->CV_XCONTENT  text
+*----------------------------------------------------------------------*
+ FORM upload_file USING    iv_filename TYPE anyuri
+                   CHANGING cv_xcontent TYPE xstring.
+   DATA: lo_slib_retriever TYPE REF TO if_slib_retriever,
+         lo_exception      TYPE REF TO cx_root,
+         lv_fault          TYPE xstring.
+
+   TRY.
+       lo_slib_retriever = cl_slib_entity_container=>create_retriever( ).
+       cv_xcontent = lo_slib_retriever->get_content( iv_filename  ).
+     CATCH cx_slib INTO lo_exception.
+       PERFORM output_message USING 'E'
+                                    'Unable to read the file specified.'(urf).
+       STOP.
+   ENDTRY.
+ ENDFORM.                    "upload_file
+
+*&---------------------------------------------------------------------*
+*&      Form  xsd2wsdl
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->IV_XCONTENT  text
+*      -->CV_WSDL      text
+*----------------------------------------------------------------------*
+ FORM xsd2wsdl USING    iv_xcontent TYPE xstring
+               CHANGING cv_wsdl     TYPE xstring.
+
+   DATA:
+         lv_message   TYPE string,
+         lx_gen_error TYPE REF TO cx_proxy_gen_error.
+
+   TRY.
+       CALL METHOD cl_proxy_test_utils=>xsd2wsdl
+         EXPORTING
+           schema = iv_xcontent
+         RECEIVING
+           wsdl   = cv_wsdl.
+     CATCH cx_proxy_gen_error INTO lx_gen_error .
+       lv_message = lx_gen_error->if_message~get_text( ).
+       PERFORM output_message USING 'E'
+                                     lv_message.
+       STOP.
+   ENDTRY.
+
+ ENDFORM.                                                   "xsd2wsdl
+
+*&---------------------------------------------------------------------*
+*&      Form  init_proxy
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->IV_WSDL    text
+*      -->IV_PCKG    text
+*      -->IV_PRAEFIX text
+*      -->CO_PROXY   text
+*----------------------------------------------------------------------*
+ FORM init_proxy USING     iv_wsdl TYPE xstring
+                           iv_pckg
+                           iv_praefix
+                 CHANGING  co_proxy TYPE REF TO cl_proxy.
+
+   DATA:
+        lx_root    TYPE REF TO cx_root,
+        lv_message TYPE string.
+
+   TRY.
+       CALL METHOD cl_proxy_test_utils=>wsdl2proxy
+         EXPORTING
+           wsdl    = iv_wsdl
+           package = iv_pckg
+           praefix = iv_praefix
+         RECEIVING
+           proxy   = co_proxy.
+     CATCH cx_proxy_gen_error INTO lx_root.
+       " LX_ROOT is checked below
+     CATCH cx_slib INTO lx_root.
+       " LX_ROOT is checked below
+     CATCH cx_sidl INTO lx_root.
+       " LX_ROOT is checked below
+   ENDTRY.
+
+   IF lx_root IS BOUND.
+     lv_message = lx_root->if_message~get_text( ).
+     PERFORM output_message USING 'E'
+                                   lv_message.
+     STOP.
+   ENDIF.
+
+ ENDFORM.                    "init_proxy
+
+*&---------------------------------------------------------------------*
+*&      Form  save_proxy
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->IO_PROXY   text
+*----------------------------------------------------------------------*
+ FORM save_proxy USING io_proxy TYPE REF TO cl_proxy.
+   DATA:
+        lx_error   TYPE REF TO cx_proxy_gen_error,
+        lv_message TYPE string.
+
+   TRY.
+       CALL METHOD io_proxy->save
+         CHANGING
+           transport_number = p_trrq.
+     CATCH cx_proxy_gen_error INTO lx_error .
+
+       lv_message = lx_error->if_message~get_text( ).
+       PERFORM output_message USING 'E'
+                                     lv_message.
+       STOP.
+
+   ENDTRY.
+
+   " No errors:
+   PERFORM output_message USING 'S'
+                                'Proxy was saved.'(pws).
+
+ ENDFORM.                    "save_proxy
+
+*&---------------------------------------------------------------------*
+*&      Form  activate_proxy
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->IO_PROXY   text
+*      -->IV_TRREQ   text
+*----------------------------------------------------------------------*
+ FORM activate_proxy USING io_proxy TYPE REF TO cl_proxy
+                           iv_trreq TYPE trkorr .
+   DATA:
+        lt_objects TYPE sprx_log_t,
+        lt_log     TYPE sprx_log_t,
+        ls_objects LIKE LINE OF lt_objects,
+        ls_log     LIKE LINE OF lt_log,
+        lx_error   TYPE REF TO cx_proxy_gen_error,
+        lv_message TYPE string.
+
+
+   TRY.
+       CALL METHOD io_proxy->activate
+         EXPORTING
+           activate_all      = 'X'
+           deletion          = 'X'
+         IMPORTING
+           activated_objects = lt_objects
+           log               = lt_log
+         CHANGING
+           transport_number  = iv_trreq.
+     CATCH cx_proxy_gen_error INTO lx_error.
+       lv_message = lx_error->if_message~get_text( ).
+       PERFORM output_message USING 'E'
+                                     lv_message.
+       STOP.
+   ENDTRY.
+
+   IF NOT lt_log[] IS INITIAL.
+     PERFORM output_message USING 'I'
+                                  'Activation log:'(alo).
+     LOOP AT lt_log INTO ls_log.
+
+       MESSAGE ID      ls_log-msgid
+               TYPE    ls_log-msgty
+               NUMBER  ls_log-msgno
+               WITH    ls_log-msgv1
+                       ls_log-msgv2
+                       ls_log-msgv3
+                       ls_log-msgv4
+                       INTO lv_message.
+       PERFORM output_message USING ls_log-msgty
+                                    lv_message.
+     ENDLOOP.
+   ENDIF.
+
+   IF NOT lt_objects[] IS INITIAL.
+     PERFORM output_message USING 'I'
+                                'Activated objects:'(oli).
+     LOOP AT lt_objects INTO ls_objects.
+
+       MESSAGE ID      ls_objects-msgid
+               TYPE    ls_objects-msgty
+               NUMBER  ls_objects-msgno
+               WITH    ls_objects-msgv1
+                       ls_objects-msgv2
+                       ls_objects-msgv3
+                       ls_objects-msgv4
+                       INTO lv_message.
+       PERFORM output_message USING ls_objects-msgty
+                                    lv_message.
+     ENDLOOP.
+   ENDIF.
+
+ ENDFORM.                    "activate_proxy
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_MESSAGE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_0129   text
+*      -->P_0130   text
+*----------------------------------------------------------------------*
+ FORM output_message  USING    p_msgty
+                               p_message.
+   WRITE: / p_msgty, p_message.
+ ENDFORM.                    " OUTPUT_MESSAGE
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILE_NAME
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_P_XSDFN  text
+*----------------------------------------------------------------------*
+ FORM get_file_name  CHANGING p_xsdfn.
+   DATA:
+     l_rc TYPE i,
+     l_action TYPE i,
+     l_file_table TYPE filetable,
+     l_file TYPE LINE OF filetable,
+     l_title TYPE string.
+
+   l_title = 'File name'(001).
+
+   CALL METHOD cl_gui_frontend_services=>file_open_dialog
+     EXPORTING
+       window_title            = l_title
+       multiselection          = space
+     CHANGING
+       file_table              = l_file_table
+       rc                      = l_rc
+       user_action             = l_action
+     EXCEPTIONS
+       file_open_dialog_failed = 1
+       cntl_error              = 2
+       error_no_gui            = 3
+       not_supported_by_gui    = 4
+       OTHERS                  = 5.
+
+   IF sy-subrc = 0 AND l_rc = 1 AND l_action = cl_gui_frontend_services=>action_ok.
+     READ TABLE l_file_table INDEX 1 INTO l_file.
+     p_xsdfn =  l_file-filename.
+   ENDIF.
+
+ ENDFORM.                    " GET_FILE_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_TRANSPORT_REQUEST
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_P_TRRQ  text
+*----------------------------------------------------------------------*
+ FORM get_transport_request  CHANGING p_trrq.
+
+   DATA: lv_req  TYPE e070-trkorr.
+
+   CALL FUNCTION 'TR_F4_REQUESTS'
+     EXPORTING
+       iv_complete_requests = ''
+     IMPORTING
+       ev_selected_request  = lv_req.
+   IF lv_req IS NOT INITIAL.
+     p_trrq = lv_req.
+   ENDIF.
+
+ ENDFORM.                    " GET_TRANSPORT_REQUEST
