@@ -1,0 +1,586 @@
+*&---------------------------------------------------------------------*
+*& Report  ZTRCHECK                                                    *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*&                                                                     *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+
+** NOTES::
+** SSFO objects don't have version management but warn when one is found in a transport
+** LIMU is not always versioned?
+
+** Possibly warn of all objects that do not support version management?
+
+
+report  ztrcheck  line-size 160.                              .
+
+type-pools: trwbo, strhi, trlck, trsel, ctslg, slis, sctsc, icon.
+
+parameters: p_trkorr type trkorr  obligatory.
+
+parameters: p_dev type sysysid obligatory default 'D01' modif id sys.
+parameters: p_qa  type sysysid obligatory default 'Q01' modif id sys.
+parameters: p_prd type sysysid obligatory default 'P10' modif id sys.
+
+types: tt_vers type vrsd occurs 0.
+
+types: begin of ty_task,
+          h                 type trwbo_request_header,
+          objects           type trwbo_t_e071,
+       end of   ty_task.
+
+types: begin of ty_object_v,
+          obj               type trwbo_s_e071,
+          vers              type tt_vers,
+          no_versions(1)    type c,
+          no_vm(1)          type c,    "indicates no version management
+       end of   ty_object_v.
+
+data: gt_request_headers type trwbo_request_headers,
+      gt_requests        type trwbo_requests,
+      gs_request         type trwbo_request,
+      gs_task            type ty_task,
+      gt_task            type table of ty_task,
+      gt_objects         type table of ty_object_v,
+      gs_object_v        type ty_object_v.
+
+data: gt_project_tr type table of trkorr.
+
+data: g_pickline type i, g_pickfield(30), g_hide_trkorr type e071-trkorr.
+
+at selection-screen output.
+  loop at screen.
+    if screen-group1 = 'SYS'.
+      screen-input = 0. modify screen.
+    endif.
+  endloop.
+
+start-of-selection.
+
+* Select tasks from main transport number.
+  call function 'TR_READ_REQUEST_WITH_TASKS'
+    exporting
+      iv_trkorr          = p_trkorr
+    importing
+      et_request_headers = gt_request_headers
+      et_requests        = gt_requests
+    exceptions
+      invalid_input      = 1
+      others             = 2.
+  if sy-subrc <> 0.
+    write: / p_trkorr, ' is an invalid transport reference, please check entry'.
+    stop.
+  endif.
+
+** Check for workbench type transport
+*  read table gt_requests into gs_request with key h-trkorr = p_trkorr.
+*  if gs_request-h-trfunction = 'W'.
+*    write: / p_trkorr, 'is a customising request, not relevant for this report'.
+*    stop.
+*  endif.
+
+* Process tasks of transport only.
+  loop at gt_requests into gs_request where h-as4text <> space.
+    perform extract_objects using gs_request.
+  endloop.
+
+  perform check_object_release.
+
+  perform output_results.
+
+at line-selection.
+  get cursor field g_pickfield line g_pickline .
+  read line g_pickline index g_pickline.
+  if g_hide_trkorr is not initial.
+    submit ztrcheck with p_trkorr = g_hide_trkorr
+      and return.
+    clear g_hide_trkorr.
+  endif.
+
+*&---------------------------------------------------------------------*
+*&      Form  output_results
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+form output_results.
+  field-symbols <vers> type vrsd.
+
+  data: ls_vreq type trwbo_request_header.
+
+  read table gt_requests into gs_request with key h-trkorr = p_trkorr.
+
+  format color col_heading intensified on.
+  write:/ 'Transport request:', p_trkorr, gs_request-h-as4text, at sy-linsz ' '.
+  format color col_heading intensified off.
+  write:/ 'Object list',  at sy-linsz ' '.
+  uline /.
+
+  loop at  gt_objects into gs_object_v.
+    format color col_key intensified off.
+    write: / gs_object_v-obj-pgmid, gs_object_v-obj-object, gs_object_v-obj-obj_name.
+    if gs_request-h-trfunction = 'Q'.
+      write: at 113 '(Customising object - simulated versioning only)' intensified on.
+    elseif gs_object_v-no_vm = 'X'.
+      if gs_object_v-obj-pgmid = 'LANG'.
+        write: at 120 '(Language transport - check not relevant)' intensified on.
+      else.
+        write: at 120 '(No VersMgmt - simulated versioning only)' intensified on.
+        if gs_object_v-obj-object = 'SSFO'.
+          perform text_control_check using gs_object_v-obj-obj_name.
+        endif.
+      endif.
+    else.
+      write: at sy-linsz ''.
+    endif.
+    format color off intensified off.
+    loop at gs_object_v-vers assigning <vers>.
+      perform get_trkorr_data using <vers>-korrnum ls_vreq.
+      if <vers>-origin = space.
+        format intensified off.
+      else.
+        format intensified on.
+      endif.
+      if <vers>-rels <> p_prd.
+        new-line.
+*       Don't hotspot the current TR number
+        if <vers>-origin = space.
+          write: at 5 <vers>-versno, <vers>-korrnum hotspot, <vers>-author, <vers>-rels.
+        else.
+          write: at 5 <vers>-versno, <vers>-korrnum, <vers>-author, <vers>-rels.
+        endif.
+*       May be showing a later unreleased version than current - mark in yellow, that's OK.
+        if <vers>-origin = 'X'.
+          write icon_led_inactive as icon.
+        elseif <vers>-korrnum > p_trkorr.
+          write icon_led_yellow as icon.
+        else.
+*         Flag as red - not imported to PRD.
+          write icon_led_red as icon.
+        endif.
+        write: ls_vreq-as4text, ls_vreq-as4date, ls_vreq-as4time .
+        g_hide_trkorr = <vers>-korrnum.
+        hide g_hide_trkorr.
+      else.
+        format color off intensified off inverse off.
+        new-line.
+        write: at 5 <vers>-versno, <vers>-korrnum hotspot, <vers>-author, <vers>-rels, icon_led_green as icon,
+               ls_vreq-as4text, ls_vreq-as4date, ls_vreq-as4time.
+      endif.
+      write at sy-linsz ''.
+    endloop.
+    if sy-subrc <> 0.
+      format color off intensified off.
+      new-line.
+      if gs_object_v-no_versions = 'X' and gs_object_v-obj-object = 'SSFO'.
+        format color col_negative intensified off.
+        write: at 5 'Smartform has no version management - double-check previous changes!!'.
+        perform text_control_check using gs_object_v-obj-obj_name.
+      elseif gs_object_v-no_versions = 'X'.
+        write: at 5 'Version management not supported for object type'.
+      else.
+        if gs_object_v-obj-pgmid = 'LANG'.
+          write: at 5 'Transport dependency is not checked for language transports'.
+        else.
+          write: at 5 'No previous versions found'.
+        endif.
+      endif.
+    endif.
+    skip 1.
+  endloop.
+
+  clear g_hide_trkorr.
+
+  uline / .
+
+endform.                    "output_results
+
+*&---------------------------------------------------------------------*
+*&      Form  get_trkorr_data
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_KORRNUM  text
+*      -->LS_VREQ    text
+*----------------------------------------------------------------------*
+form get_trkorr_data using p_korrnum type e071-trkorr ls_vreq type trwbo_request_header.
+
+  data: ls_request_header    type trwbo_request_header.
+
+  ls_request_header-trkorr = p_korrnum.
+  call function 'TRINT_READ_REQUEST_HEADER'
+    exporting
+      iv_read_e070  = 'X'
+      iv_read_e07t  = 'X'
+      iv_read_e070c = 'X'
+      iv_read_e070m = 'X'
+    changing
+      cs_request    = ls_request_header
+    exceptions
+      others        = 1.
+
+  ls_vreq = ls_request_header.
+
+endform.                    "get_trkorr_data
+*&---------------------------------------------------------------------*
+*&      Form  extract_objects
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_REQUEST  text
+*----------------------------------------------------------------------*
+form extract_objects using p_request type trwbo_request.
+
+  data lt_lversno_list              type table of vrsn .
+  data lv_objname                   type vrsd-objname .
+  data lv_objtype                   type vrsd-objtype .
+
+  clear gs_task.
+
+  gs_task-h = p_request-h.
+  gs_task-objects = p_request-objects.
+  append gs_task  to gt_task.
+
+* Build a definitive object list from all involved tasks.
+  loop at p_request-objects into gs_object_v-obj.
+*   Skip internal TR object type CORR
+    check gs_object_v-obj-pgmid <> 'CORR'.
+**   Skip object types with no version management support
+*
+*    check gs_object_v-obj-object <> 'TABU'.
+*    check gs_object_v-obj-object <> 'CDAT'.
+*    check gs_object_v-obj-object <> 'VDAT'.
+*    check gs_object_v-obj-object <> 'SOBJ'.
+*    check gs_object_v-obj-object <> 'MESS'.
+*    check gs_object_v-obj-object <> 'DOCU'.
+*    check gs_object_v-obj-object <> 'SOTT'.
+*    check gs_object_v-obj-object <> 'TRAN'.
+*    check gs_object_v-obj-object <> 'SXCI'.
+*    check gs_object_v-obj-object <> 'TOBJ'.
+*    check gs_object_v-obj-object <> 'CINS'.
+*    check gs_object_v-obj-object <> 'NOTE'.
+
+*   CLAS is probably only ever present for a new CLASS therefore to check
+*   versions we need to make new request objects fro the CPUB, CPRO and CPRI objects.
+*   Remove the CLAS and replace with these object types. Append to current table, they
+*   will then fall into the current pass.
+    if gs_object_v-obj-object = 'CLAS'.
+      delete p_request-objects.
+      gs_object_v-obj-object = 'CPRI'.
+      append gs_object_v-obj to p_request-objects.
+      gs_object_v-obj-object = 'CPRO'.
+      append gs_object_v-obj to p_request-objects.
+      gs_object_v-obj-object = 'CPUB'.
+      append gs_object_v-obj to p_request-objects.
+      continue.
+    endif.
+
+    clear: gs_object_v-vers, gs_object_v-no_versions.
+    read table gt_objects with key obj-pgmid = gs_object_v-obj-pgmid
+                                   obj-object = gs_object_v-obj-object
+                                   obj-obj_name = gs_object_v-obj-obj_name
+                                   transporting no fields.
+    if sy-subrc <> 0.
+*     Only limited processing required for LANG type.
+      if gs_object_v-obj-pgmid = 'LANG'.
+        gs_object_v-no_vm = 'X'.
+        append gs_object_v to gt_objects.
+        continue.
+      endif.
+
+      lv_objname = gs_object_v-obj-obj_name.
+      case gs_object_v-obj-object.
+        when 'PROG'.
+          lv_objtype = 'REPS'.
+        when 'TABL'.
+          lv_objtype = 'TABD'.
+        when 'DTEL'.
+          lv_objtype = 'DTED'.
+        when 'DOMA'.
+          lv_objtype = 'DOMD'.
+        when 'FUGR'.
+          lv_objtype = 'REPS'.
+          concatenate 'SAPL' gs_object_v-obj-obj_name into lv_objname.
+        when others.
+          lv_objtype = gs_object_v-obj-object.
+      endcase.
+      select count(*) from  versobj
+             where  object   = lv_objtype
+             and    versno   = '99999'
+             and    actflag  = 'A'.
+      if sy-subrc = 0.
+*     Get the version history of the object.
+        call function 'SVRS_GET_VERSION_DIRECTORY_46'
+          exporting
+            objname                = lv_objname
+            objtype                = lv_objtype
+          tables
+            lversno_list           = lt_lversno_list
+            version_list           = gs_object_v-vers
+          exceptions
+            no_entry               = 1
+            communication_failure_ = 2
+            system_failure         = 3
+            others                 = 4.
+        if sy-subrc <> 0.
+          gs_object_v-no_versions = 'X'.
+        endif.
+      else.
+        perform trace_tr_history using  gs_object_v-obj-pgmid
+                                        gs_object_v-obj-object
+                                        gs_object_v-obj-obj_name
+                                        gs_object_v-vers
+                                        gs_object_v-no_versions.
+        gs_object_v-no_vm = 'X'.
+      endif.
+      append gs_object_v to gt_objects.
+    endif.
+    clear gs_object_v.
+  endloop.
+
+endform.                    "extract_objects
+
+*&---------------------------------------------------------------------*
+*&      Form  check_object_release
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+form check_object_release.
+* Find out how far the previous versions have proceeded into PRD.
+  loop at gt_objects into gs_object_v where no_vm = ' '.
+    perform check_version_release changing gs_object_v.
+    modify gt_objects from gs_object_v.
+  endloop.
+
+endform.                    "check_object_release
+
+*&---------------------------------------------------------------------*
+*&      Form  check_version_release
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_OBJECT   text
+*----------------------------------------------------------------------*
+form check_version_release changing p_object type ty_object_v.
+
+  data: ls_cofile   type  ctslg_cofile,
+        ls_system   type  ctslg_system.
+
+  field-symbols <vers> type vrsd.
+
+* Update VRSD-RELS to indicate system import progress. DEV->QA->PRD.
+  loop at p_object-vers assigning <vers>.
+*   Version 0 is not to be included. Some oddity (upgrade?) puts version 0000 on latest version, only do this if .
+    if <vers>-versno = '00000' and sy-tabix = 1.
+      delete p_object-vers.
+      continue.
+    endif.
+*   some version changes don't record on TR
+    if  <vers>-korrnum is initial.
+      delete p_object-vers.
+      continue.
+    endif.
+*   Is this a version in current TR? If it is , mark it as 'origin'
+    clear <vers>-origin.
+    read table gt_requests with key h-trkorr = <vers>-korrnum transporting no fields.
+    if sy-subrc = 0.
+      <vers>-origin = 'X'.
+*      delete p_object-vers.
+*      continue.
+    endif.
+
+
+*   Start point is DEV
+    <vers>-rels = p_dev.
+
+    perform get_cofiles using <vers>-korrnum ls_cofile.
+
+    loop at ls_cofile-systems into ls_system.
+*     Check for QA import.
+      if ls_system-systemid = p_qa.
+        read table ls_system-steps with key stepid = 'I' transporting no fields.
+        if sy-subrc = 0.
+          <vers>-rels = p_qa.
+        endif.
+      endif.
+*     Check for PRD import.
+      if ls_system-systemid = p_prd.
+        read table ls_system-steps with key stepid = 'I' transporting no fields.
+        if sy-subrc = 0.
+          <vers>-rels = p_prd.
+        else. "check if it is already released from QA
+          read table ls_system-steps with key stepid = 'q' transporting no fields.
+          if sy-subrc = 0.
+            <vers>-rels = p_prd.
+          endif.
+        endif.
+      endif.
+    endloop.
+  endloop.
+
+endform.                    "check_version_release
+
+*&---------------------------------------------------------------------*
+*&      Form  get_cofiles
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_KORRNUM  text
+*      -->P_COFILE   text
+*----------------------------------------------------------------------*
+form get_cofiles using p_korrnum p_cofile type  ctslg_cofile.
+  data: lv_dir_type                  type tstrf01-dirtype value 'T',
+        lv_trkorr                    type e070-trkorr,
+        ls_settings                  type  ctslg_settings.
+
+  ls_settings-point_to_missing_steps = 'X'.
+  ls_settings-detailed_depiction     = 'X'.
+  lv_trkorr = p_korrnum.
+  call function 'TR_READ_GLOBAL_INFO_OF_REQUEST'
+    exporting
+      iv_trkorr   = lv_trkorr
+      iv_dir_type = lv_dir_type
+      is_settings = ls_settings
+    importing
+      es_cofile   = p_cofile.
+
+endform.                    "get_cofiles
+
+*&---------------------------------------------------------------------*
+*&      Form  trace_tr_history
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_PGMID    text
+*      -->P_OBJTYPE  text
+*      -->P_OBJNAME  text
+*      -->P_OBJECT_V text
+*----------------------------------------------------------------------*
+form trace_tr_history using  p_pgmid
+                             p_objtype
+                             p_objname
+                             p_object_v  type tt_vers
+                             p_no_versions.
+
+  data: lt_e071 type table of e071, ls_e071 type e071,
+        ls_vers type vrsd,
+        ls_e070 type e070.
+
+  data: ls_cofile   type  ctslg_cofile,
+        ls_system   type  ctslg_system,
+        ls_step     type  ctslg_step,
+        ls_action   type  ctslg_action.
+
+  field-symbols: <vers> type vrsd.
+
+* Get object references in other TR's.
+  select * from  e071 into table lt_e071
+         where  pgmid     = p_pgmid
+         and    object    = p_objtype
+         and    obj_name  = p_objname.
+
+  if sy-subrc <> 0.
+    p_no_versions = 'X'.
+    exit.
+  endif.
+
+  loop at lt_e071  into ls_e071.
+*   Don't process 'project' level references.
+    read table gt_project_tr transporting no fields with key table_line = ls_e071-trkorr.
+    check sy-subrc <> 0.
+
+    select single * from  e070 into ls_e070 where  trkorr  = ls_e071-trkorr.
+
+    if sy-subrc <> 0.
+      continue.
+    endif.
+
+*   Not at transport level (i.e. a task), ignore it.
+    if ls_e070-trfunction na 'KQ'.
+      append ls_e071-trkorr to gt_project_tr.
+      continue.
+    endif.
+
+    ls_vers-objtype  = p_objtype.
+    ls_vers-objname  = p_objname.
+    ls_vers-versno   = 0.
+    ls_vers-korrnum  = ls_e071-trkorr.
+    ls_vers-author   = ls_e070-as4user.
+
+    ls_vers-rels = p_dev.
+
+    if ls_e070-trfunction = 'K'.
+*     Get workbench co-files
+      perform get_cofiles using ls_e071-trkorr ls_cofile.
+    else.
+*     Get customising co-files
+      perform get_cofiles using ls_e070-strkorr ls_cofile.
+    endif.
+
+    loop at ls_cofile-systems into ls_system.
+*     Get Dev export time.
+      if ls_system-systemid = p_dev.
+        read table ls_system-steps with key stepid = 'E' into ls_step.
+        if sy-subrc = 0.
+          loop at ls_step-actions into ls_action.
+            ls_vers-datum    = ls_action-date.
+            ls_vers-zeit     = ls_action-time.
+          endloop.
+        endif.
+      endif.
+*     Check for QA import.
+      if ls_system-systemid = p_qa.
+        read table ls_system-steps with key stepid = 'I' transporting no fields.
+        if sy-subrc = 0.
+          ls_vers-rels = p_qa.
+        endif.
+      endif.
+*     Check for PRD import.
+      if ls_system-systemid = p_prd.
+        read table ls_system-steps with key stepid = 'I' transporting no fields.
+        if sy-subrc = 0.
+          ls_vers-rels = p_prd.
+        endif.
+      endif.
+    endloop.
+    append ls_vers to p_object_v.
+  endloop.
+
+  data: lv_verno(5) type n value 0.
+  sort p_object_v by datum ascending zeit ascending.
+
+  loop at p_object_v assigning <vers>.
+    add 1 to lv_verno.
+    <vers>-versno = lv_verno.
+  endloop.
+  sort p_object_v by versno descending.
+
+endform.                    "trace_tr_history
+
+*&---------------------------------------------------------------------*
+*&      Form  text_control_check
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_OBJ_NAME text
+*----------------------------------------------------------------------*
+form text_control_check using p_obj_name.
+  data: lv_rc type i,
+        lv_formincl(30),
+        lv_formname type tdsfname.
+
+"* Does form have any long text control?
+"  select count(*) from yesftxtctrl
+"      where formname = p_obj_name.
+"  check sy-subrc = 0.
+
+"  lv_formname = p_obj_name.
+"  perform get_program_detail(yesftxtctrl) using lv_formname lv_formincl lv_rc.
+"  check lv_rc = 0.
+
+"* Is the form modified?
+"  perform load_formpool_and_check(yesftxtctrl) using lv_formincl lv_rc.
+"  if lv_rc = 0.
+"    Write: / 'Smartform does not have long text control applied (transaction YESFTXTCTRL)' color col_negative, at sy-linsz ''.
+"  endif.
+endform.                    "text_control_check
