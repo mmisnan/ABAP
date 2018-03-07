@@ -119,12 +119,12 @@
 *----------------------------------------------------------------------*
 *      -->IV_WSDL    text
 *      -->IV_PCKG    text
-*      -->IV_PRAEFIX text
+*      -->IV_prefix text
 *      -->CO_PROXY   text
 *----------------------------------------------------------------------*
  FORM init_proxy USING     iv_wsdl TYPE xstring
                            iv_pckg
-                           iv_praefix
+                           iv_prefix
                  CHANGING  co_proxy TYPE REF TO cl_proxy.
 
    DATA:
@@ -136,7 +136,7 @@
          EXPORTING
            wsdl    = iv_wsdl
            package = iv_pckg
-           praefix = iv_praefix
+           praefix = iv_prefix
          RECEIVING
            proxy   = co_proxy.
      CATCH cx_proxy_gen_error INTO lx_root.
