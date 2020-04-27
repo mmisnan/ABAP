@@ -1,0 +1,931 @@
+*&---------------------------------------------------------------------*
+*& Report  ZPJA_PM002                                                  *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*& Text Elements:                                                      *
+*& P_DEVC Show user-exits from development class                       *
+*& S01    Selection data (TCode takes precedence  over program name)   *
+*&---------------------------------------------------------------------*
+* MOH270306 - Add active enhancements to the list ..
+
+REPORT  zpja_pm002
+  NO STANDARD PAGE HEADING
+  LINE-SIZE 256.
+
+*tables: enlfdir.     "Additional Attributes for Function Modules
+
+DATA: tabix      LIKE sy-tabix,
+      w_linnum   TYPE i,
+      w_off      TYPE i,
+      w_index    LIKE sy-tabix,
+      w_include  LIKE trdir-name,
+      w_prog     LIKE trdir-name,
+      w_incl     LIKE trdir-name,
+      w_area     LIKE rs38l-area,
+      w_level,
+      w_str(50)  TYPE c,
+      w_funcname LIKE tfdir-funcname.
+
+CONSTANTS: c_fmod(40) TYPE c VALUE 'Function modules selected: ',
+           c_subm(40) TYPE c VALUE 'Submit programs selected: ',
+           c_col1(12) TYPE c VALUE 'Enhanmt Type',
+           c_col2(40) TYPE c VALUE 'Enhancement',
+           c_col3(30) TYPE c VALUE 'Program/Include',
+           c_col4(20) TYPE c VALUE 'Enhancement Name',
+           c_col5(40) TYPE c VALUE 'Enhancement Description',
+           c_col6(8)  TYPE c VALUE 'Project',
+           c_col7(1)  TYPE c VALUE 'S',
+           c_col8(12) TYPE c VALUE 'ChangeName',
+           c_col9(10)  TYPE c VALUE 'ChangeDate'.
+
+
+* Work Areas: ABAP Workbench
+DATA: BEGIN OF wa_d010inc.
+DATA: master TYPE d010inc-master.
+DATA: END OF wa_d010inc.
+
+DATA: BEGIN OF wa_tfdir.
+DATA: funcname TYPE tfdir-funcname,
+      pname    TYPE tfdir-pname,
+      include  TYPE tfdir-include.
+DATA: END OF wa_tfdir.
+
+DATA: BEGIN OF wa_tadir.
+DATA: devclass TYPE tadir-devclass.
+DATA: END OF wa_tadir.
+
+DATA: BEGIN OF wa_tstc.
+DATA: pgmna TYPE tstc-pgmna.
+DATA: END OF wa_tstc.
+
+DATA: BEGIN OF wa_tstcp.
+DATA: param TYPE tstcp-param.
+DATA: END OF wa_tstcp.
+
+DATA: BEGIN OF wa_enlfdir.
+DATA: area TYPE enlfdir-area.
+DATA: END OF wa_enlfdir.
+
+* Work Areas: BADIs
+DATA: wa_sxs_attr LIKE sxs_attr.
+
+DATA: BEGIN OF wa_sxs_attrt.
+DATA: text TYPE sxs_attrt-text.
+DATA: END OF wa_sxs_attrt.
+
+
+* Work Areas: Enhancements
+DATA: BEGIN OF wa_modsap.
+DATA: member TYPE modsap-member.
+DATA: END OF wa_modsap.
+
+DATA: BEGIN OF wa_modsapa.
+DATA: name TYPE modsapa-name.
+DATA: END OF wa_modsapa.
+
+DATA: BEGIN OF wa_modsapt.
+DATA: modtext TYPE modsapt-modtext.
+DATA: END OF wa_modsapt.
+
+* Work Areas: Business Transaction Events
+DATA: BEGIN OF wa_tbe01t.
+DATA: text1 TYPE tbe01t-text1.
+DATA: END OF wa_tbe01t.
+
+DATA: BEGIN OF wa_tps01t.
+DATA: text1 TYPE tps01t-text1.
+DATA: END OF wa_tps01t.
+
+* user-exits
+TYPES:  BEGIN OF ty_mod,
+          member  LIKE modact-member,
+          name    LIKE modact-name,
+          status  LIKE modattr-status,
+          anam    LIKE modattr-anam,
+          adat    LIKE modattr-adat,
+        END OF ty_mod.
+DATA:   w_mod  TYPE ty_mod.
+
+TYPE-POOLS: seex.
+TYPES: seex_exit_list_tab_type TYPE seex_exit_list_type OCCURS 0.
+
+TYPES: BEGIN OF t_userexit,
+      type(12) TYPE c,
+      pname    LIKE trdir-name,
+      txt(300),
+      level    TYPE c,
+      modname(30) TYPE c,
+      modtext(40) TYPE c,
+      modattr     TYPE ty_mod,
+      badi_imps   TYPE seex_exit_list_tab_type,
+END OF t_userexit.
+DATA: i_userexit TYPE STANDARD TABLE OF t_userexit WITH HEADER LINE.
+
+* Function module developmnet classes
+TYPES: BEGIN OF t_devclass,
+      clas   LIKE trdir-clas,
+END OF t_devclass.
+DATA: i_devclass TYPE STANDARD TABLE OF t_devclass WITH HEADER LINE.
+
+* Submit programs
+TYPES: BEGIN OF t_submit,
+      pname     LIKE trdir-name,
+      level,
+      done,
+END OF t_submit.
+DATA: i_submit TYPE STANDARD TABLE OF t_submit WITH HEADER LINE.
+
+* Source code
+TYPES: BEGIN OF t_sourcetab,                        "#EC * (SLIN lügt!)
+        line(200),                                  "#EC * (SLIN lügt!)
+      END OF t_sourcetab.                           "#EC * (SLIN lügt!)
+DATA: sourcetab TYPE STANDARD TABLE OF t_sourcetab WITH HEADER LINE.
+DATA c_overflow(65535) TYPE c.
+
+* Description of an ABAP/4 source analysis token
+DATA: i_stoken TYPE STANDARD TABLE OF stokex WITH HEADER LINE.
+DATA wa_stoken LIKE i_stoken.
+
+* Description of an ABAP/4 source analysis statement
+DATA: i_sstmnt TYPE STANDARD TABLE OF sstmnt WITH HEADER LINE."#ECNEEDED
+DATA: i_levels TYPE STANDARD TABLE OF slevel WITH HEADER LINE,
+      i_struct TYPE STANDARD TABLE OF sstruc WITH HEADER LINE.
+
+* keywords for searching ABAP code
+TYPES: BEGIN OF t_keywords,
+      word(30),
+END OF t_keywords.
+DATA: keywords TYPE STANDARD TABLE OF t_keywords WITH HEADER LINE.
+
+* function modules within program
+TYPES: BEGIN OF t_fmodule,
+      name   LIKE rs38l-name,
+      pname  LIKE trdir-name,
+      pname2 LIKE trdir-name,
+      level,
+      bapi,
+      done,
+END OF t_fmodule.
+DATA: i_fmodule TYPE STANDARD TABLE OF t_fmodule WITH HEADER LINE.
+
+*&--------------------------------------------------------------------&*
+*& Selection Options                                                  &*
+*&--------------------------------------------------------------------&*
+SELECTION-SCREEN BEGIN OF BLOCK selscr1 WITH FRAME TITLE text-s01.
+PARAMETER: p_pname LIKE trdir-name,
+           p_tcode LIKE syst-tcode,
+           p_limit(4) TYPE n DEFAULT 100,
+           p_devc  LIKE rihea-dy_ofn DEFAULT ' ',
+           p_func  LIKE rihea-dy_ofn DEFAULT ' ',
+           p_subm  LIKE rihea-dy_ofn DEFAULT ' '.
+SELECTION-SCREEN END OF BLOCK selscr1.
+
+*&--------------------------------------------------------------------&*
+*& START-OF-SELECTION                                                 &*
+*&--------------------------------------------------------------------&*
+START-OF-SELECTION.
+
+  IF p_pname IS INITIAL AND p_tcode IS INITIAL.
+    MESSAGE e008(hrfpm).  "Make entry on the selection screen
+    STOP.
+  ENDIF.
+
+* ensure P_LIMIT is not zero.
+  IF p_limit = 0.
+    p_limit = 1.
+  ENDIF.
+
+  PERFORM data_select.
+  PERFORM get_additional_data.
+  PERFORM data_display.
+
+*&--------------------------------------------------------------------&*
+*& Form DATA_SELECT                                                   &*
+*&--------------------------------------------------------------------&*
+*&                                                                    &*
+*&--------------------------------------------------------------------&*
+FORM data_select.
+
+* data selection message to sap gui
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    DESTINATION 'SAPGUI'
+    KEEPING LOGICAL UNIT OF WORK
+    EXPORTING
+      text                  = 'Get programs/includes'       "#EC NOTEXT
+    EXCEPTIONS
+      system_failure
+      communication_failure
+    .                                                       "#EC *
+
+* determine search words
+  keywords-word = 'CALL'.
+  APPEND keywords.
+  keywords-word = 'FORM'.
+  APPEND keywords.
+  keywords-word = 'PERFORM'.
+  APPEND keywords.
+  keywords-word = 'SUBMIT'.
+  APPEND keywords.
+  keywords-word = 'INCLUDE'.
+  APPEND keywords.
+
+  IF NOT p_tcode IS INITIAL.
+* get program name from TCode
+    SELECT SINGLE pgmna FROM tstc INTO wa_tstc-pgmna
+                 WHERE tcode EQ p_tcode.
+    IF NOT wa_tstc-pgmna IS INITIAL.
+      p_pname = wa_tstc-pgmna.
+* TCode does not include program name, but does have refereve TCode
+    ELSE.
+      SELECT SINGLE param FROM tstcp INTO wa_tstcp-param
+                   WHERE tcode EQ p_tcode.
+      IF sy-subrc = 0.
+        CHECK wa_tstcp-param(1)   = '/'.
+        CHECK wa_tstcp-param+1(1) = '*'.
+        IF wa_tstcp-param CA ' '.
+        ENDIF.
+        w_off = sy-fdpos + 1.
+        SUBTRACT 2 FROM sy-fdpos.
+        IF sy-fdpos GT 0.
+          p_tcode = wa_tstcp-param+2(sy-fdpos).
+        ENDIF.
+        SELECT SINGLE pgmna FROM tstc INTO wa_tstc-pgmna
+               WHERE tcode EQ p_tcode.
+        p_pname = wa_tstc-pgmna.
+        IF sy-subrc <> 0.
+          MESSAGE e110(/saptrx/asc) WITH 'No program found for: '
+                  p_tcode.                                  "#EC NOTEXT
+          STOP.
+        ENDIF.
+      ELSE.
+        MESSAGE e110(/saptrx/asc) WITH 'No program found for: '
+                  p_tcode.                                  "#EC NOTEXT
+        STOP.
+      ENDIF.
+
+    ENDIF.
+  ENDIF.
+
+* Call customer-function aus Program coding
+  READ REPORT p_pname INTO sourcetab.
+  IF sy-subrc > 0.
+    MESSAGE e017(enhancement) WITH p_pname RAISING no_program."#EC *
+  ENDIF.
+
+  SCAN ABAP-SOURCE sourcetab TOKENS     INTO i_stoken
+                             STATEMENTS INTO i_sstmnt
+                             LEVELS     INTO i_levels
+                             STRUCTURES INTO i_struct
+                             KEYWORDS   FROM keywords
+                             OVERFLOW INTO c_overflow
+                             WITH INCLUDES.
+  IF sy-subrc > 0. "keine/syntakt. falsche Ablauflog./Fehler im Skanner
+    MESSAGE e130(enhancement) RAISING syntax_error.         "#EC *
+  ENDIF.
+
+* check I_STOKEN for entries
+  CLEAR w_linnum.
+  DESCRIBE TABLE i_stoken LINES w_linnum.
+  IF w_linnum GT 0.
+    w_level = '0'.
+    w_prog = ''.
+    w_incl = ''.
+    PERFORM data_search TABLES i_stoken USING w_level w_prog w_incl.
+  ENDIF.
+
+ENDFORM.                        "DATA_SELECT
+
+*&--------------------------------------------------------------------&*
+*& Form DATA_SEARCH                                                   &*
+*&--------------------------------------------------------------------&*
+*&                                                                    &*
+*&--------------------------------------------------------------------&*
+FORM data_search TABLES p_stoken STRUCTURE stoken
+                        USING p_level p_prog p_incl.
+
+  DATA: lt_stoken LIKE stoken OCCURS 0 WITH HEADER LINE.
+
+  lt_stoken[] =  p_stoken[].
+
+  LOOP AT lt_stoken.
+
+    p_stoken = lt_stoken.
+    TRANSLATE p_stoken-str TO UPPER CASE.
+    CLEAR i_userexit.
+
+    tabix = sy-tabix + 1.
+    i_userexit-level = p_level.
+    IF i_userexit-level = '0'.
+      IF p_incl IS INITIAL.
+        i_userexit-pname = p_pname.
+      ELSE.
+        CONCATENATE  p_pname '/' p_incl INTO i_userexit-pname.
+      ENDIF.
+    ELSE.
+      IF p_incl IS INITIAL.
+        i_userexit-pname = p_prog.
+      ELSE.
+        CONCATENATE  p_prog '/' p_incl INTO i_userexit-pname.
+      ENDIF.
+    ENDIF.
+
+* Include
+    IF p_stoken-str EQ 'INCLUDE'.
+      CHECK p_level EQ '0'.    " do not perform for function modules
+      w_index = sy-tabix + 1.
+      READ TABLE p_stoken INDEX w_index INTO wa_stoken.
+      CHECK NOT wa_stoken-str CS 'STRUCTURE'.
+      CHECK NOT wa_stoken-str CS 'SYMBOL'.
+      READ TABLE i_submit WITH KEY pname = wa_stoken-str.
+      IF sy-subrc <> 0.
+        i_submit-pname = wa_stoken-str.
+        i_submit-level = p_level.
+        APPEND i_submit.
+        PERFORM get_further_submit USING i_submit.
+      ENDIF.
+    ENDIF.
+
+* Enhancements
+    IF p_stoken-str EQ 'CUSTOMER-FUNCTION'.
+      CLEAR w_funcname.
+      READ TABLE p_stoken INDEX tabix.
+      TRANSLATE p_stoken-str USING ''' '.
+      CONDENSE p_stoken-str.
+      IF p_prog IS INITIAL.
+        CONCATENATE 'EXIT' p_pname p_stoken-str INTO w_funcname
+                     SEPARATED BY '_'.
+      ELSE.
+        CONCATENATE 'EXIT' p_prog p_stoken-str INTO w_funcname
+               SEPARATED BY '_'.
+      ENDIF.
+      SELECT SINGLE member FROM modsap INTO wa_modsap-member
+            WHERE member = w_funcname.
+      IF sy-subrc = 0.   " check for valid enhancement
+        i_userexit-type = 'Enhancement'.
+        i_userexit-txt  = w_funcname.
+        APPEND i_userexit.
+      ELSE.
+        CLEAR wa_d010inc.
+        SELECT SINGLE master INTO wa_d010inc-master
+              FROM d010inc
+                 WHERE include = p_prog.
+        CONCATENATE 'EXIT' wa_d010inc-master p_stoken-str
+          INTO w_funcname
+               SEPARATED BY '_'.
+        i_userexit-type = 'Enhancement'.
+        i_userexit-txt  = w_funcname.
+      ENDIF.
+    ENDIF.
+
+* BADIs
+    IF p_stoken-str CS 'CL_EXITHANDLER='.
+      w_index = sy-tabix + 4.
+      READ TABLE p_stoken INDEX w_index INTO wa_stoken.
+      i_userexit-txt = wa_stoken-str.
+      REPLACE ALL OCCURRENCES OF '''' IN i_userexit-txt WITH space.
+      i_userexit-type = 'BADI'.
+      APPEND i_userexit.
+    ENDIF.
+
+* Business transaction events
+    IF p_stoken-str CS 'OPEN_FI_PERFORM'.
+      i_userexit-type = 'BusTrEvent'.
+      i_userexit-txt = p_stoken-str.
+      REPLACE ALL OCCURRENCES OF '''' IN i_userexit-txt WITH space.
+      i_userexit-modname =  i_userexit-txt+16(8).
+      CASE i_userexit-txt+25(1).
+        WHEN 'E'.
+          CLEAR wa_tbe01t.
+          SELECT SINGLE text1 INTO wa_tbe01t-text1 FROM tbe01t
+                           WHERE event = i_userexit-txt+16(8)
+                             AND spras = sy-langu.
+          IF wa_tbe01t-text1 IS INITIAL.
+            i_userexit-modtext = '<Not active>'.            "#EC NOTEXT
+          ELSE.
+            i_userexit-modtext = wa_tbe01t-text1.
+          ENDIF.
+          i_userexit-modname+8 = '/P&S'.                    "#EC NOTEXT
+        WHEN 'P'.
+          CLEAR wa_tps01t.
+          SELECT SINGLE text1 INTO wa_tps01t-text1 FROM tps01t
+                           WHERE procs = i_userexit-txt+16(8)
+                             AND spras = sy-langu.
+          i_userexit-modtext = wa_tps01t-text1.
+          i_userexit-modname+8 = '/Process'.
+      ENDCASE.
+
+      APPEND i_userexit.
+    ENDIF.
+
+* Program exits
+    IF p_stoken-str CS 'USEREXIT_' OR p_stoken-str CS 'MOVE_USERFIELDS'.
+      i_userexit-type = 'Program Exit'.
+      i_userexit-txt = p_stoken-str.
+      REPLACE ALL OCCURRENCES OF '''' IN i_userexit-txt WITH space.
+      APPEND i_userexit.
+    ENDIF.
+* Submit programs
+    IF p_stoken-str CS 'SUBMIT'.
+      CHECK p_level EQ '0'.    " do not perform for function modules
+      CHECK NOT p_stoken-str CS '_'.   " ensure not SUBMIT_XXX
+      w_index = sy-tabix + 1.
+      READ TABLE p_stoken INDEX w_index INTO wa_stoken.
+      CHECK NOT wa_stoken-str CS '_'.   " ensure not SUBMIT_XXX
+      REPLACE ALL OCCURRENCES OF '''' IN wa_stoken-str WITH space.
+      READ TABLE i_submit WITH KEY pname = wa_stoken-str.
+      IF sy-subrc <> 0.
+        i_submit-pname = wa_stoken-str.
+        i_submit-level = p_level.
+        APPEND i_submit.
+        PERFORM get_further_submit USING i_submit.
+      ENDIF.
+    ENDIF.
+
+* Perform routines (which reference external programs)
+    IF p_stoken-str CS 'PERFORM'.
+      CHECK p_level EQ '0'.    " do not perform for function modules
+      w_index = sy-tabix + 1.
+      READ TABLE p_stoken INDEX w_index INTO wa_stoken.
+      IF NOT wa_stoken-ovfl IS INITIAL.
+        w_off = wa_stoken-off1 + 10.
+        w_str = c_overflow+w_off(30).
+        FIND ')' IN w_str MATCH OFFSET w_off.
+        w_off = w_off + 1.
+        wa_stoken-str = w_str(w_off).
+      ENDIF.
+
+      CHECK wa_stoken-str CS '('.
+      w_off = 0.
+      WHILE sy-subrc  = 0.
+        IF wa_stoken-str+w_off(1) EQ '('.
+          REPLACE SECTION OFFSET w_off LENGTH 1 OF wa_stoken-str
+            WITH ''.
+          REPLACE ALL OCCURRENCES OF ')' IN wa_stoken-str WITH space.
+          READ TABLE i_submit WITH KEY pname = wa_stoken-str.
+          IF sy-subrc <> 0.
+            i_submit-pname = wa_stoken-str.
+            APPEND i_submit.
+            PERFORM get_further_submit USING i_submit.
+          ENDIF.
+          EXIT.
+        ELSE.
+          REPLACE SECTION OFFSET w_off LENGTH 1 OF wa_stoken-str
+            WITH ''.
+          SHIFT wa_stoken-str LEFT DELETING LEADING space.
+        ENDIF.
+      ENDWHILE.
+    ENDIF.
+
+* Function modules
+    IF p_stoken-str CS 'FUNCTION'.
+      CLEAR i_fmodule.
+      CHECK p_level EQ '0'.    " do not perform for function modules
+      w_index = sy-tabix + 1.
+      READ TABLE p_stoken INDEX w_index INTO wa_stoken.
+
+      IF wa_stoken-str CS 'BAPI'.
+        i_fmodule-bapi = 'X'.
+      ENDIF.
+      REPLACE FIRST OCCURRENCE OF '''' IN wa_stoken-str WITH space.
+      REPLACE FIRST OCCURRENCE OF '''' IN wa_stoken-str WITH space.
+      IF sy-subrc = 4.   " didn't find 2nd quote (ie name truncated)
+        CLEAR wa_tfdir.
+        CONCATENATE wa_stoken-str '%' INTO wa_stoken-str.
+        SELECT SINGLE funcname INTO wa_tfdir-funcname FROM tfdir
+                     WHERE funcname LIKE wa_stoken-str.
+        IF sy-subrc = 0.
+          i_fmodule-name = wa_tfdir-funcname.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+      ELSE.
+        i_fmodule-name = wa_stoken-str.
+      ENDIF.
+
+      i_fmodule-level = p_level.
+      APPEND i_fmodule.
+      PERFORM get_further_fmodule USING i_fmodule.
+
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.                        "DATA_SEARCH
+
+*&--------------------------------------------------------------------&*
+*& Form GET_ADDITIONAL_DATA                                           &*
+*&--------------------------------------------------------------------&*
+*&                                                                    &*
+*&--------------------------------------------------------------------&*
+FORM get_additional_data.
+
+* data selection message to sap gui
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    DESTINATION 'SAPGUI'
+    KEEPING LOGICAL UNIT OF WORK
+    EXPORTING
+      text                  = 'Get additional data'         "#EC NOTEXT
+    EXCEPTIONS
+      system_failure
+      communication_failure
+    .                                                       "#EC *
+
+  LOOP AT i_userexit.
+* Enhancement data
+    IF  i_userexit-type CS 'Enh'.
+      CLEAR: wa_modsapa.
+      SELECT SINGLE name INTO wa_modsapa-name FROM modsap
+                        WHERE member = i_userexit-txt.
+      CHECK sy-subrc = 0.
+      i_userexit-modname = wa_modsapa-name.
+
+      CLEAR wa_modsapt.
+      SELECT SINGLE modtext INTO wa_modsapt-modtext FROM modsapt
+                        WHERE name = wa_modsapa-name
+                                     AND sprsl = sy-langu.
+      i_userexit-modtext = wa_modsapt-modtext.
+* MOH - enhancement to get the project name
+      CLEAR w_mod.
+      SELECT SINGLE modact~member modact~name modattr~status
+                    modattr~anam  modattr~adat
+        INTO w_mod
+        FROM modact
+        INNER JOIN modattr
+          ON modattr~name = modact~name
+        WHERE modact~member = wa_modsapa-name
+          AND modact~typ    = space.
+      i_userexit-modattr  = w_mod.
+* MOH - eoe
+    ENDIF.
+* BADI data
+    IF  i_userexit-type EQ 'BADI'.
+      CLEAR wa_sxs_attr.
+      SELECT SINGLE exit_name internal INTO
+        (wa_sxs_attr-exit_name, wa_sxs_attr-internal)
+        FROM sxs_attr
+        WHERE exit_name = i_userexit-txt.
+      IF sy-subrc = 0.
+        IF wa_sxs_attr IS INITIAL.
+          i_userexit-modname = i_userexit-txt.
+        ELSE.
+          CONCATENATE i_userexit-txt '/' 'INTERNAL'
+            INTO i_userexit-modname.
+        ENDIF.
+        CLEAR i_userexit-badi_imps[].
+* MOH - enhancement to get active implementations
+        CALL FUNCTION 'SXL_GET_ALL_ACCORDING_IMPS'
+          EXPORTING
+            exit_name  = wa_sxs_attr-exit_name
+            mnt_langu  = sy-langu
+            mst_langu  = sy-langu
+          TABLES
+            imps       = i_userexit-badi_imps
+          EXCEPTIONS
+            no_results = 1
+            OTHERS     = 2.
+      ELSE.
+        i_userexit-modname = 'Dynamic call'.                "#EC NOTEXT
+      ENDIF.
+      CLEAR wa_sxs_attrt.
+      SELECT SINGLE text INTO wa_sxs_attrt-text FROM sxs_attrt
+            WHERE exit_name = wa_sxs_attr-exit_name
+              AND sprsl = sy-langu.
+      i_userexit-modtext = wa_sxs_attrt-text.
+    ENDIF.
+
+    MODIFY i_userexit.
+  ENDLOOP.
+
+* get enhancements via program package
+  CLEAR wa_tadir.
+  SELECT SINGLE devclass INTO wa_tadir-devclass FROM tadir
+                             WHERE pgmid    = 'R3TR'
+                               AND object   = 'PROG'
+                               AND obj_name = p_pname.
+  IF sy-subrc = 0.
+    CLEAR: wa_modsapa, wa_modsapt.
+    SELECT name FROM modsapa INTO wa_modsapa-name
+                          WHERE devclass = wa_tadir-devclass.
+      SELECT SINGLE modtext FROM modsapt INTO wa_modsapt-modtext
+                          WHERE name = wa_modsapa-name
+                            AND sprsl = sy-langu.
+
+      READ TABLE i_userexit WITH KEY modname = wa_modsapa-name.
+      IF sy-subrc <> 0.
+        i_userexit-modtext = wa_modsapt-modtext.
+        i_userexit-type = 'Enhancement'.                    "#EC NOTEXT
+        i_userexit-modname  = wa_modsapa-name.
+        i_userexit-txt = 'Determined from program DevClass'."#EC NOTEXT
+        i_userexit-pname = 'Unknown'.                       "#EC NOTEXT
+        APPEND i_userexit.
+      ENDIF.
+    ENDSELECT.
+  ENDIF.
+
+ENDFORM.                        "GET_ADDITIONAL_DATA
+
+*&--------------------------------------------------------------------&*
+*& Form DATA_DISPLAY                                                  &*
+*&--------------------------------------------------------------------&*
+*&                                                                    &*
+*&--------------------------------------------------------------------&*
+FORM data_display.
+
+  DATA: lv_badi   TYPE seex_exit_list_type,
+        lv_first.
+* data selection message to sap gui
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    DESTINATION 'SAPGUI'
+    KEEPING LOGICAL UNIT OF WORK
+    EXPORTING
+      text                  = 'Prepare screen for display'  "#EC NOTEXT
+    EXCEPTIONS
+      system_failure
+      communication_failure
+    .                                                       "#EC *
+
+  SORT i_userexit BY type txt modname.
+  DELETE ADJACENT DUPLICATES FROM i_userexit COMPARING txt modname.
+
+* format headings
+  WRITE: 'Enhancements from main program'.                  "#EC NOTEXT
+  WRITE: /.
+  ULINE.
+  FORMAT COLOR COL_HEADING.
+  WRITE: /    sy-vline,
+         (12) c_col1,                    "Enhanmt Type
+              sy-vline,
+         (40) c_col2,                    "Enhancement
+              sy-vline,
+         (30) c_col3,                    "Program/Include
+              sy-vline,
+         (30) c_col4,                    "Enhancement name
+              sy-vline,
+         (40) c_col5,                    "Enhancement description
+              sy-vline,
+         (8)  c_col6,                    "Project
+              sy-vline,
+         (1)  c_col7,                    "S
+              sy-vline,
+         (12) c_col8,                    "ChangeName
+              sy-vline,
+         (10)  c_col9,                    "ChangeDate
+              sy-vline.
+  FORMAT RESET.
+  ULINE.
+
+* format lines
+  LOOP AT i_userexit.
+* set line colour
+    CASE i_userexit-type.
+      WHEN 'Enhancement'.
+        FORMAT COLOR 3 INTENSIFIED OFF.
+      WHEN 'BADI'.
+        FORMAT COLOR 4 INTENSIFIED OFF.
+      WHEN 'BusTrEvent'.
+        FORMAT COLOR 5 INTENSIFIED OFF.
+      WHEN 'Program Exit'.
+        FORMAT COLOR 6 INTENSIFIED OFF.
+      WHEN OTHERS.
+        FORMAT RESET.
+    ENDCASE.
+    WRITE: / sy-vline,
+             i_userexit-type,
+             sy-vline,
+             i_userexit-txt(40),
+             sy-vline,
+             i_userexit-pname(30),
+             sy-vline,
+             i_userexit-modname(30),
+             sy-vline,
+             i_userexit-modtext(40),
+             sy-vline.
+* MOH - enhancement
+    CASE i_userexit-type.
+      WHEN 'Enhancement'.
+        WRITE:  i_userexit-modattr-name,
+                sy-vline,
+                i_userexit-modattr-status,
+                sy-vline,
+                i_userexit-modattr-anam,
+                sy-vline,
+                i_userexit-modattr-adat NO-ZERO,
+                sy-vline.
+      WHEN 'BADI'.
+*          imp_name LIKE sxc_exit-imp_name,
+*          flt_val  LIKE sxc_exit-flt_val,
+*          text     LIKE sxc_attrt-text,
+*          active   LIKE sxc_attr-active,
+        lv_first = 'X'.
+        LOOP AT i_userexit-badi_imps INTO lv_badi
+          where active = 'X'.
+          IF lv_first EQ 'X'.
+            WRITE: lv_badi-imp_name,
+                   sy-vline,
+                   lv_badi-text,
+                   sy-vline.
+            lv_first = space.
+          ELSE.
+            WRITE: /170 lv_badi-imp_name,
+                        sy-vline,
+                        lv_badi-text,
+                        sy-vline.
+          ENDIF.
+        ENDLOOP.
+    ENDCASE.
+* MOH - eoe
+
+  ENDLOOP.
+  FORMAT RESET.
+  ULINE.
+
+* user-exits from development class of function modules
+  IF p_devc = 'X'.
+    WRITE: /.
+    WRITE: / 'User-exits from function module development class'."#EC
+    WRITE: 157''.
+    ULINE (90).
+    WRITE: 157''.
+
+    LOOP AT i_devclass.
+      CLEAR wa_modsapa.
+      SELECT name FROM modsapa INTO wa_modsapa
+                   WHERE devclass = i_devclass-clas.
+        SELECT SINGLE name modtext
+          INTO CORRESPONDING FIELDS OF wa_modsapt
+          FROM modsapt
+         WHERE name  = wa_modsapa-name
+           AND sprsl = sy-langu.
+        FORMAT COLOR 3 INTENSIFIED OFF.
+        WRITE: / sy-vline,
+                 (12) 'Enhancement',
+                 sy-vline,
+                wa_modsapa-name,
+                sy-vline,
+                wa_modsapt-modtext,
+                sy-vline.
+      ENDSELECT.
+    ENDLOOP.
+    ULINE (90).
+    FORMAT RESET.
+  ENDIF.
+
+  DESCRIBE TABLE i_fmodule LINES w_linnum.
+  WRITE: / c_fmod , AT 35 w_linnum.                         "#EC NOTEXT
+  WRITE: 157''.
+  IF p_func = 'X'.
+* display fuction modules used in program
+    ULINE (38).
+    WRITE: 157''.
+    LOOP AT i_fmodule.
+      WRITE: sy-vline,
+             i_fmodule-name,
+             sy-vline,
+             i_fmodule-bapi,
+             sy-vline.
+      WRITE: 157''.
+    ENDLOOP.
+    ULINE (38).
+  ENDIF.
+
+  DESCRIBE TABLE i_submit LINES w_linnum.
+  WRITE: / c_subm , AT 35 w_linnum.                         "#EC NOTEXT
+  WRITE: 157''.
+  IF p_subm = 'X'.
+* display submit programs used in program
+    ULINE (44).
+    WRITE: 157''.
+    LOOP AT i_submit.
+      WRITE: sy-vline,
+             i_submit-pname,
+             sy-vline.
+      WRITE: 157''.
+    ENDLOOP.
+    ULINE (44).
+  ENDIF.
+
+* issue message with number of user-exits displayed
+  DESCRIBE TABLE i_userexit LINES w_linnum.
+  MESSAGE s697(56) WITH w_linnum.
+
+ENDFORM.                        "DATA_DISPLAY
+*&---------------------------------------------------------------------*
+*&      Form  get_further_submit
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_I_SUBMIT  text
+*----------------------------------------------------------------------*
+FORM get_further_submit  USING    p_submit STRUCTURE i_submit.
+
+  DATA: lt_stoken  LIKE i_stoken OCCURS 0 WITH HEADER LINE,
+        lt_sstmnt  LIKE i_sstmnt OCCURS 0 WITH HEADER LINE,
+        lt_levels  LIKE i_levels OCCURS 0 WITH HEADER LINE.
+  CLEAR: sourcetab[], sourcetab.
+* data selection message to sap gui
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    DESTINATION 'SAPGUI'
+    KEEPING LOGICAL UNIT OF WORK
+    EXPORTING
+      text = 'Get submit data'.
+
+* Check if we've done with this submit/form
+  READ TABLE i_submit WITH KEY pname = p_submit-pname.
+  IF i_submit-done = 'X'.
+    EXIT.
+  ENDIF.
+* Tag as done!
+  i_submit-done = 'X'.
+  MODIFY i_submit INDEX sy-tabix.
+* Read report into sourcetab
+  READ REPORT i_submit-pname INTO sourcetab.
+  IF sy-subrc = 0.
+    SCAN ABAP-SOURCE sourcetab TOKENS     INTO lt_stoken
+                               STATEMENTS INTO lt_sstmnt
+                               LEVELS     INTO lt_levels
+                               KEYWORDS   FROM keywords
+                               WITH INCLUDES.
+    IF sy-subrc > 0.
+      EXIT.
+    ENDIF.
+* Check i_stoken for entries
+    CLEAR w_linnum.
+    DESCRIBE TABLE lt_stoken LINES w_linnum.
+    IF w_linnum GT 0.
+      w_prog  = i_submit-pname.
+      w_incl = ''.
+      w_level = 0.
+      PERFORM data_search TABLES lt_stoken USING w_level w_prog w_incl.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " get_further_submit
+*&---------------------------------------------------------------------*
+*&      Form  get_further_fmodule
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_I_FMODULE  text
+*----------------------------------------------------------------------*
+FORM get_further_fmodule  USING    p_fmodule STRUCTURE i_fmodule.
+
+  DATA:    lv_tabix LIKE sy-tabix.
+
+  DATA: lt_stoken  LIKE i_stoken OCCURS 0 WITH HEADER LINE,
+        lt_sstmnt  LIKE i_sstmnt OCCURS 0 WITH HEADER LINE,
+        lt_levels  LIKE i_levels OCCURS 0 WITH HEADER LINE.
+  CLEAR: sourcetab[], sourcetab.
+* data selection message to sap gui
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    DESTINATION 'SAPGUI'
+    KEEPING LOGICAL UNIT OF WORK
+    EXPORTING
+      text = 'Get function module data'.
+* Function module data
+  READ TABLE i_fmodule WITH KEY name = p_fmodule-name.
+  IF i_fmodule-done EQ 'X'.
+    EXIT.
+  ENDIF.
+  lv_tabix = sy-tabix.
+
+  CLEAR wa_tfdir.
+  SELECT SINGLE funcname pname include FROM tfdir INTO wa_tfdir
+                          WHERE funcname = i_fmodule-name.
+  CHECK sy-subrc = 0.
+
+  CALL FUNCTION 'FUNCTION_INCLUDE_SPLIT'
+    EXPORTING
+      program = wa_tfdir-pname
+    IMPORTING
+      group   = w_area.
+
+  CONCATENATE 'L' w_area 'U' wa_tfdir-include INTO w_include.
+  i_fmodule-pname  = w_include.
+  i_fmodule-pname2 = wa_tfdir-pname.
+  i_fmodule-done   = 'X'.
+  MODIFY i_fmodule INDEX lv_tabix.
+
+  READ REPORT i_fmodule-pname INTO sourcetab.
+  IF sy-subrc = 0.
+
+    SCAN ABAP-SOURCE sourcetab TOKENS     INTO lt_stoken
+                               STATEMENTS INTO lt_sstmnt
+                               LEVELS     INTO lt_levels
+                               KEYWORDS   FROM keywords
+                               WITH INCLUDES.
+    IF sy-subrc > 0.
+      EXIT.
+    ENDIF.
+
+* check i_stoken for entries
+    CLEAR w_linnum.
+    DESCRIBE TABLE lt_stoken LINES w_linnum.
+    IF w_linnum GT 0.
+      w_prog  = i_fmodule-pname2.
+      w_incl  = i_fmodule-pname.
+      w_level = 0.
+      PERFORM data_search TABLES lt_stoken USING w_level w_prog w_incl.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " get_further_fmodule
