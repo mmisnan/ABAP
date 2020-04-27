@@ -1,0 +1,88 @@
+*&---------------------------------------------------------------------*
+*& Report  YECA_SEARCH_SAPSCRIPT                                       *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*&                                                                     *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+REPORT  yeca_search_sapscript LINE-SIZE 255.
+
+TABLES: stxh.
+
+DATA:  t_stxh   LIKE stxh  OCCURS 0 WITH HEADER LINE.
+DATA:  tlines   LIKE tline OCCURS 0 WITH HEADER LINE.
+DATA:  lv_tabix LIKE sy-tabix,
+       lv_win   LIKE sy-tabix,
+       ls_stxh  LIKE stxh.
+
+SELECT-OPTIONS: s_tdform  FOR stxh-tdform.
+PARAMETERS: pa_text   TYPE tdline DEFAULT 'BITMAP',
+            pa_ori    AS CHECKBOX.
+
+
+START-OF-SELECTION.
+
+* header
+  SELECT * INTO TABLE t_stxh
+    FROM stxh
+    WHERE tdobject  = 'FORM'
+      AND tdname   IN s_tdform
+      AND tdid      = 'TXT'.
+
+  SORT t_stxh.
+
+  LOOP AT t_stxh.
+    CLEAR tlines[].
+    IF pa_ori = 'X'.
+      IF t_stxh-tdname EQ ls_stxh-tdname.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+    CALL FUNCTION 'READ_TEXT'
+      EXPORTING
+        id                      = t_stxh-tdid
+        language                = t_stxh-tdspras
+        name                    = t_stxh-tdname
+        object                  = t_stxh-tdobject
+      TABLES
+        lines                   = tlines
+      EXCEPTIONS
+        id                      = 1
+        language                = 2
+        name                    = 3
+        not_found               = 4
+        object                  = 5
+        reference_check         = 6
+        wrong_access_to_archive = 7
+        OTHERS                  = 8.
+    lv_tabix = 1.
+    DO.
+      SEARCH tlines FOR pa_text STARTING AT lv_tabix AND MARK.
+      IF sy-subrc EQ 0.
+        READ TABLE tlines INDEX sy-tabix.
+        IF tlines-tdformat <> '/*'.
+          WRITE: /(25) t_stxh-tdname, (2) t_stxh-tdspras, (2) t_stxh-tdospras,
+                  (80) tlines-tdline.
+          HIDE: t_stxh-tdname, t_stxh-tdspras, t_stxh-tdospras.
+          lv_tabix = sy-tabix + 1.
+          IF pa_ori = 'X'.
+            ls_stxh = t_stxh.
+            EXIT.
+          ENDIF.
+* Get the windows
+          DO 10 TIMES.
+            lv_win = sy-tabix - 1.
+            READ TABLE tlines INDEX lv_win.
+            IF tlines-tdformat EQ '/W'.
+              WRITE: (15) tlines-tdline.
+              EXIT.
+            ENDIF.
+          ENDDO.
+        ELSE.
+          lv_tabix = sy-tabix + 1.
+        ENDIF.
+      ELSE.
+        EXIT.
+      ENDIF.
+    ENDDO.
+  ENDLOOP.
